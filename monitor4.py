@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, scrolledtext
 from paramiko import SSHClient, AutoAddPolicy, AuthenticationException, SSHException
 from threading import Thread
 from queue import Queue
@@ -12,7 +12,7 @@ class ServerMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Server Monitor")
-
+        self.root.state('zoomed')
         # Input fields, button, and output text
         self.hostname_label = ttk.Label(root, text="Hostname:")
         self.hostname_entry = ttk.Entry(root)
@@ -24,24 +24,24 @@ class ServerMonitorApp:
         self.password_entry = ttk.Entry(root, show="*")
         self.monitor_button = ttk.Button(root, text="Start Monitoring", command=self.start_monitoring)
         self.stop_button = ttk.Button(root, text="Stop Monitoring", command=self.stop_monitoring, state=tk.DISABLED)
+        self.show_process_button = ttk.Button(root, text="Show Process List", command=self.show_process_list)
         self.exit_button = ttk.Button(root, text="Exit", command=self.exit_program)
 
         # Create a Figure and set it up for plotting
-        self.fig, (self.ax_cpu, self.ax_memory, self.ax_processes) = plt.subplots(3, 1, figsize=(10, 8),
-                                                                                  tight_layout=True)
+        self.fig, (self.ax_cpu, self.ax_memory, self.ax_network, self.ax_disk, self.ax_process) = plt.subplots(1, 5, figsize=(20, 4),
+                                                                                                      tight_layout=True)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")  # Updated grid row to 7
-
-        # Show Process List button
-        self.process_button = ttk.Button(root, text="Show Process List", command=self.show_process_list)
-        self.process_button.grid(row=6, column=1, pady=10)
+        self.canvas_widget.grid(row=6, column=0, columnspan=5, padx=5, pady=5, sticky="nsew")
 
         # Store metrics data
         self.time_points = []
         self.cpu_usage_data = []
         self.memory_usage_data = []
-        self.processes_data = []  # Corrected initialization
+        self.network_data_sent = []
+        self.network_data_received = []
+        self.disk_usage_data = []
+        self.process_count_data = []
 
         # SSH Client
         self.ssh_client = None
@@ -56,15 +56,11 @@ class ServerMonitorApp:
         self.monitoring_running = False
 
         # Configure grid row and column weights for dynamic resizing
-        for i in range(8):  # Updated to 8 for the new row
+        for i in range(7):
             self.root.grid_rowconfigure(i, weight=1)
-        for i in range(3):
+        for i in range(5):
             self.root.grid_columnconfigure(i, weight=1)
 
-        # Add the following lines for automatic window resizing
-        self.root.update_idletasks()
-        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
-        self.root.update()
         # Grid layout
         self.hostname_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.hostname_entry.grid(row=0, column=1, padx=5, pady=5)
@@ -76,7 +72,8 @@ class ServerMonitorApp:
         self.password_entry.grid(row=3, column=1, padx=5, pady=5)
         self.monitor_button.grid(row=4, column=0, pady=10)
         self.stop_button.grid(row=4, column=1, pady=10)
-        self.exit_button.grid(row=5, column=0, columnspan=2, pady=10)
+        self.show_process_button.grid(row=4, column=2, pady=10)
+        self.exit_button.grid(row=5, column=0, columnspan=3, pady=10)
 
     def start_monitoring(self):
         hostname = self.hostname_entry.get()
@@ -101,6 +98,21 @@ class ServerMonitorApp:
         # Gửi thông điệp để dừng giám sát
         self.queue.put("STOP_MONITORING")
 
+    def show_process_list(self):
+        if self.ssh_client:
+            stdin, stdout, stderr = self.ssh_client.exec_command("ps aux")
+            process_list = stdout.read().decode()
+            self.show_result_window(process_list)
+
+
+    def show_result_window(self, result_text):
+        result_window = tk.Toplevel(self.root)
+        result_window.title("Process List")
+
+        text_area = scrolledtext.ScrolledText(result_window, wrap=tk.WORD, width=80, height=30)
+        text_area.insert(tk.INSERT, result_text)
+        text_area.grid(row=0, column=0, padx=10, pady=10)
+
     def exit_program(self):
         # Kiểm tra xem luồng giám sát đang chạy không
         if self.monitor_thread and self.monitor_thread.is_alive():
@@ -120,10 +132,9 @@ class ServerMonitorApp:
 
         try:
             self.ssh_client.connect(hostname, port, username, password)
-            commands = ['uptime', 'df -h', 'free -m']
+            commands = ['uptime', 'df -h', 'free -m', 'cat /proc/net/dev']
 
             while True:
-                # Kiểm tra xem có yêu cầu dừng giám sát không
                 if not self.queue.empty():
                     command = self.queue.get()
                     if command == "STOP_MONITORING":
@@ -131,15 +142,22 @@ class ServerMonitorApp:
 
                 cpu_usage = self.get_cpu_usage(self.ssh_client)
                 memory_usage = self.get_memory_usage(self.ssh_client)
+                network_sent, network_received = self.get_network_data(self.ssh_client)
+                disk_usage = self.get_disk_usage(self.ssh_client)
                 process_count = self.get_process_count(self.ssh_client)
 
                 self.time_points.append(time.strftime("%H:%M:%S"))
                 self.cpu_usage_data.append(cpu_usage)
                 self.memory_usage_data.append(memory_usage)
-                self.processes_data.append(process_count)
+                self.network_data_sent.append(network_sent)
+                self.network_data_received.append(network_received)
+                self.disk_usage_data.append(disk_usage)
+                self.process_count_data.append(process_count)
 
                 self.update_graph()
-                print(f"CPU Usage: {cpu_usage}%\nMemory Usage: {memory_usage} MB\nNumber of Processes: {process_count}")
+                print(f"CPU Usage: {cpu_usage}%\nMemory Usage: {memory_usage} MB\n"
+                      f"Network Sent: {network_sent} bytes\nNetwork Received: {network_received} bytes\n"
+                      f"Disk Usage: {disk_usage}%\nNumber of Processes: {process_count}")
 
                 time.sleep(5)
 
@@ -151,55 +169,30 @@ class ServerMonitorApp:
             print(f"An unexpected error occurred: {str(e)}")
 
         finally:
-            # Đóng kết nối SSH nếu nó đang mở
             if self.ssh_client:
                 self.ssh_client.close()
                 self.ssh_client = None
 
-            # Enable Start Monitoring button and disable Stop Monitoring button
             self.monitor_button["state"] = tk.NORMAL
             self.stop_button["state"] = tk.DISABLED
+            self.show_process_button["state"] = tk.NORMAL
 
             self.monitoring_running = False
             print("Monitoring stopped.")
 
-    def get_process_count(self, ssh):
-        stdin, stdout, stderr = ssh.exec_command("ps aux | wc -l")
-        return int(stdout.read().decode().strip())
-
-    def update_processes_chart(self):
-        self.ax_processes.clear()
-        self.ax_processes.plot(self.time_points, self.processes_data, marker='o', linestyle='-', color='orange')
-        self.ax_processes.set_ylabel('Number of Processes')
-        self.ax_processes.set_title('Number of Processes')
-
-        # Update canvas
-        self.canvas.draw()
-
-    def show_process_list(self):
-        # Ensure there is an active SSH connection
-        if not self.ssh_client:
-            print("No active SSH connection.")
-            return
+    def get_network_data(self, ssh):
+        stdin, stdout, stderr = ssh.exec_command("cat /proc/net/dev")
+        network_data = stdout.read().decode().strip().split()
 
         try:
-            # Run the 'ps' command to get the list of processes
-            stdin, stdout, stderr = self.ssh_client.exec_command("ps aux")
+            if len(network_data) >= 1:
+                network_sent = int(network_data[9])
+                network_received = int(network_data[1])
+                return network_sent, network_received
+        except ValueError:
+            pass
 
-            # Read the process list
-            process_list = stdout.read().decode()
-
-            # Create a new window to display the process list
-            process_window = tk.Toplevel(self.root)
-            process_window.title("Process List")
-
-            # Create a Text widget to display the process list
-            text_widget = tk.Text(process_window, wrap=tk.WORD)
-            text_widget.insert(tk.END, process_list)
-            text_widget.pack(expand=True, fill=tk.BOTH)
-
-        except Exception as e:
-            print(f"An error occurred while retrieving the process list: {str(e)}")
+        return 0, 0
 
     def get_cpu_usage(self, ssh):
         stdin, stdout, stderr = ssh.exec_command("top -bn1 | awk 'NR>7{s+=$9} END {print s}'")
@@ -209,37 +202,85 @@ class ServerMonitorApp:
         stdin, stdout, stderr = ssh.exec_command("free -m | awk 'NR==2{print $3}'")
         return int(stdout.read().decode().strip())
 
+    def get_disk_usage(self, ssh):
+        stdin, stdout, stderr = ssh.exec_command("df -h / | awk 'NR==2{printf \"%s,%s\", $3, $4}'")
+        disk_usage_str = stdout.read().decode().strip()
+
+        try:
+            used_gb, free_gb = map(str, disk_usage_str.split(','))
+            return used_gb, free_gb
+        except ValueError:
+            pass
+
+        return "0", "0"
+
+    def get_process_count(self, ssh):
+        stdin, stdout, stderr = ssh.exec_command("ps aux | wc -l")
+        return int(stdout.read().decode().strip())
+
+    def plot_network_chart(self):
+        self.ax_network.clear()
+        network_sent = max(0, self.network_data_sent[-1])
+        network_received = max(0, self.network_data_received[-1])
+        self.ax_network.bar(['Sent'], [network_sent], color='orange', label='Sent')
+        self.ax_network.bar(['Received'], [network_received], color='lightblue', label='Received', bottom=network_sent)
+        self.ax_network.set_ylabel('Network Usage (Bytes)')
+        self.ax_network.set_title('Network Usage')
+        self.ax_network.legend()
+        self.canvas.draw()
+
+    def plot_disk_chart(self):
+        self.ax_disk.clear()
+
+        used_gb, free_gb = self.disk_usage_data[-1]
+
+        used_gb_value = float(used_gb[:-1]) if used_gb[-1] == 'G' else float(used_gb)
+        free_gb_value = float(free_gb[:-1]) if free_gb[-1] == 'G' else float(free_gb)
+
+        self.ax_disk.bar(['Used'], [used_gb_value], color='lightcoral', label='Used')
+        self.ax_disk.bar(['Free'], [free_gb_value], color='lightblue', label='Free', bottom=used_gb_value)
+
+        self.ax_disk.set_ylabel('Disk Usage (GB)')
+        self.ax_disk.set_title('Disk Usage')
+        self.ax_disk.legend()
+        self.canvas.draw()
+
+    def plot_process_chart(self):
+        self.ax_process.clear()
+        process_count = self.process_count_data[-1]
+        self.ax_process.bar(['Process Count'], [process_count], color='gold')
+        self.ax_process.set_ylabel('Number of Processes')
+        self.ax_process.set_title('Process Count')
+        self.canvas.draw()
+
     def update_graph(self):
         self.root.after(0, self.plot_pie_chart)
-        self.root.after(0, self.plot_processes_chart)  # Add this line to update the processes chart
+        self.root.after(0, self.plot_network_chart)
+        self.root.after(0, self.plot_disk_chart)
+        self.root.after(0, self.plot_process_chart)
+
 
     def plot_pie_chart(self):
-        # CPU Usage Pie Chart
         cpu_values = [max(0, float(100 - self.cpu_usage_data[-1])), max(0, float(self.cpu_usage_data[-1]))]
         self.ax_cpu.clear()
         try:
-            self.ax_cpu.pie(cpu_values, labels=['', f'CPU Usage: {self.cpu_usage_data[-1]:.1f}%'], autopct='%1.1f%%',
+            self.ax_cpu.pie(cpu_values, labels=['', f'Usage: {self.cpu_usage_data[-1]:.1f}%'], autopct='%1.1f%%',
                             startangle=90, colors=['lightgray', 'lightblue'])
         except ValueError:
-            pass  # Handle the ValueError gracefully
+            pass
         self.ax_cpu.set_title('CPU Usage')
 
-        # Memory Usage Bar Chart
         self.ax_memory.clear()
         memory_value = max(0, float(self.memory_usage_data[-1]))
         self.ax_memory.bar(['Memory Usage'], [memory_value], color='lightgreen')
         self.ax_memory.set_ylabel('Memory Usage (MB)')
         self.ax_memory.set_title('Memory Usage')
 
-        # Update canvas
         self.canvas.draw()
-
-    def plot_processes_chart(self):
-        self.update_processes_chart()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = ServerMonitorApp(root)
-    root.geometry("1600x900")
+    root.geometry("800x600")
     root.mainloop()

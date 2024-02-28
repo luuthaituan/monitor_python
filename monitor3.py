@@ -12,7 +12,7 @@ class ServerMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Server Monitor")
-
+        self.root.state('zoomed')
         # Input fields, button, and output text
         self.hostname_label = ttk.Label(root, text="Hostname:")
         self.hostname_entry = ttk.Entry(root)
