@@ -61,6 +61,10 @@ class ServerMonitorApp:
         for i in range(3):
             self.root.grid_columnconfigure(i, weight=1)
 
+        # Add the following lines for automatic window resizing
+        self.root.update_idletasks()
+        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+        self.root.update()
         # Grid layout
         self.hostname_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.hostname_entry.grid(row=0, column=1, padx=5, pady=5)
