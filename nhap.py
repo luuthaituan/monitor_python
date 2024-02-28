@@ -27,15 +27,21 @@ class ServerMonitorApp:
         self.exit_button = ttk.Button(root, text="Exit", command=self.exit_program)
 
         # Create a Figure and set it up for plotting
-        self.fig, (self.ax_cpu, self.ax_memory) = plt.subplots(1, 2, figsize=(10, 4), tight_layout=True)
+        self.fig, (self.ax_cpu, self.ax_memory, self.ax_processes) = plt.subplots(3, 1, figsize=(10, 8),
+                                                                                  tight_layout=True)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        self.canvas_widget.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")  # Updated grid row to 7
+
+        # Show Process List button
+        self.process_button = ttk.Button(root, text="Show Process List", command=self.show_process_list)
+        self.process_button.grid(row=6, column=1, pady=10)
 
         # Store metrics data
         self.time_points = []
         self.cpu_usage_data = []
         self.memory_usage_data = []
+        self.processes_data = []  # Corrected initialization
 
         # SSH Client
         self.ssh_client = None
@@ -50,7 +56,7 @@ class ServerMonitorApp:
         self.monitoring_running = False
 
         # Configure grid row and column weights for dynamic resizing
-        for i in range(7):
+        for i in range(8):  # Updated to 8 for the new row
             self.root.grid_rowconfigure(i, weight=1)
         for i in range(3):
             self.root.grid_columnconfigure(i, weight=1)
@@ -121,13 +127,15 @@ class ServerMonitorApp:
 
                 cpu_usage = self.get_cpu_usage(self.ssh_client)
                 memory_usage = self.get_memory_usage(self.ssh_client)
+                process_count = self.get_process_count(self.ssh_client)
 
                 self.time_points.append(time.strftime("%H:%M:%S"))
                 self.cpu_usage_data.append(cpu_usage)
                 self.memory_usage_data.append(memory_usage)
+                self.processes_data.append(process_count)
 
                 self.update_graph()
-                print(f"CPU Usage: {cpu_usage}%\nMemory Usage: {memory_usage} MB")
+                print(f"CPU Usage: {cpu_usage}%\nMemory Usage: {memory_usage} MB\nNumber of Processes: {process_count}")
 
                 time.sleep(5)
 
@@ -151,6 +159,44 @@ class ServerMonitorApp:
             self.monitoring_running = False
             print("Monitoring stopped.")
 
+    def get_process_count(self, ssh):
+        stdin, stdout, stderr = ssh.exec_command("ps aux | wc -l")
+        return int(stdout.read().decode().strip())
+
+    def update_processes_chart(self):
+        self.ax_processes.clear()
+        self.ax_processes.plot(self.time_points, self.processes_data, marker='o', linestyle='-', color='orange')
+        self.ax_processes.set_ylabel('Number of Processes')
+        self.ax_processes.set_title('Number of Processes')
+
+        # Update canvas
+        self.canvas.draw()
+
+    def show_process_list(self):
+        # Ensure there is an active SSH connection
+        if not self.ssh_client:
+            print("No active SSH connection.")
+            return
+
+        try:
+            # Run the 'ps' command to get the list of processes
+            stdin, stdout, stderr = self.ssh_client.exec_command("ps aux")
+
+            # Read the process list
+            process_list = stdout.read().decode()
+
+            # Create a new window to display the process list
+            process_window = tk.Toplevel(self.root)
+            process_window.title("Process List")
+
+            # Create a Text widget to display the process list
+            text_widget = tk.Text(process_window, wrap=tk.WORD)
+            text_widget.insert(tk.END, process_list)
+            text_widget.pack(expand=True, fill=tk.BOTH)
+
+        except Exception as e:
+            print(f"An error occurred while retrieving the process list: {str(e)}")
+
     def get_cpu_usage(self, ssh):
         stdin, stdout, stderr = ssh.exec_command("top -bn1 | awk 'NR>7{s+=$9} END {print s}'")
         return float(stdout.read().decode().strip())
@@ -161,6 +207,7 @@ class ServerMonitorApp:
 
     def update_graph(self):
         self.root.after(0, self.plot_pie_chart)
+        self.root.after(0, self.plot_processes_chart)  # Add this line to update the processes chart
 
     def plot_pie_chart(self):
         # CPU Usage Pie Chart
@@ -183,9 +230,12 @@ class ServerMonitorApp:
         # Update canvas
         self.canvas.draw()
 
+    def plot_processes_chart(self):
+        self.update_processes_chart()
+
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = ServerMonitorApp(root)
-    root.geometry("800x600")
+    root.geometry("1600x900")
     root.mainloop()
