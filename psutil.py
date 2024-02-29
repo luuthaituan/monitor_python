@@ -1,19 +1,22 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from datetime import datetime
+from tkinter import ttk, scrolledtext, messagebox
 from paramiko import SSHClient, AutoAddPolicy, AuthenticationException, SSHException
 from threading import Thread
 from queue import Queue
 import time
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import requests
+import urllib.parse
 
 
 class ServerMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Server Monitor")
-        self.root.state('zoomed')
         # Input fields, button, and output text
+        self.hostname = ""
         self.hostname_label = ttk.Label(root, text="Hostname:")
         self.hostname_entry = ttk.Entry(root)
         self.port_label = ttk.Label(root, text="Port:")
@@ -27,9 +30,22 @@ class ServerMonitorApp:
         self.show_process_button = ttk.Button(root, text="Show Process List", command=self.show_process_list)
         self.exit_button = ttk.Button(root, text="Exit", command=self.exit_program)
 
+        # Initialize variables to store previous CPU and memory usage values
+        self.prev_cpu_usage = 0
+        self.prev_memory_usage = 0
+
+        # Google Chat webhook URL
+        self.chat_webhook_url = "https://chat.googleapis.com/v1/spaces/AAAAHWvcL0w/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=_ZfiqSMRQND-cVezibsDWdxx7dBLInxQgKFI_Lhim0M"
+
         # Create a Figure and set it up for plotting
-        self.fig, (self.ax_cpu, self.ax_memory, self.ax_network, self.ax_disk, self.ax_process) = plt.subplots(1, 5, figsize=(20, 4),
-                                                                                                      tight_layout=True)
+        self.fig, (
+            self.ax_cpu, self.ax_memory, self.ax_disk, self.ax_process, self.ax_uptime) = plt.subplots(
+            1,
+            5,
+            figsize=(
+                20,
+                4),
+            tight_layout=True)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=6, column=0, columnspan=5, padx=5, pady=5, sticky="nsew")
@@ -38,10 +54,9 @@ class ServerMonitorApp:
         self.time_points = []
         self.cpu_usage_data = []
         self.memory_usage_data = []
-        self.network_data_sent = []
-        self.network_data_received = []
         self.disk_usage_data = []
         self.process_count_data = []
+        self.uptime_data = []
 
         # SSH Client
         self.ssh_client = None
@@ -82,6 +97,7 @@ class ServerMonitorApp:
         password = self.password_entry.get()
 
         if not self.monitoring_running:
+            self.hostname = hostname
             # Tạo một luồng mới cho quá trình giám sát
             self.monitor_thread = Thread(target=self.monitor_server, args=(hostname, port, username, password))
             self.monitor_thread.start()
@@ -90,6 +106,10 @@ class ServerMonitorApp:
             self.stop_button["state"] = tk.NORMAL
             self.monitor_button["state"] = tk.DISABLED
             self.monitoring_running = True
+
+            # Update the title of the root window
+            self.root.title("Server Monitor - Monitoring is active")
+
             print("Monitoring started...")
         else:
             print("Monitoring is already running.")
@@ -98,12 +118,14 @@ class ServerMonitorApp:
         # Gửi thông điệp để dừng giám sát
         self.queue.put("STOP_MONITORING")
 
+        # Update the title of the root window
+        self.root.title("Server Monitor")
+
     def show_process_list(self):
         if self.ssh_client:
             stdin, stdout, stderr = self.ssh_client.exec_command("ps aux")
             process_list = stdout.read().decode()
             self.show_result_window(process_list)
-
 
     def show_result_window(self, result_text):
         result_window = tk.Toplevel(self.root)
@@ -132,7 +154,7 @@ class ServerMonitorApp:
 
         try:
             self.ssh_client.connect(hostname, port, username, password)
-            commands = ['uptime', 'df -h', 'free -m', 'cat /proc/net/dev']
+            commands = ['uptime', 'df -h', 'free -m']
 
             while True:
                 if not self.queue.empty():
@@ -142,57 +164,96 @@ class ServerMonitorApp:
 
                 cpu_usage = self.get_cpu_usage(self.ssh_client)
                 memory_usage = self.get_memory_usage(self.ssh_client)
-                network_sent, network_received = self.get_network_data(self.ssh_client)
                 disk_usage = self.get_disk_usage(self.ssh_client)
                 process_count = self.get_process_count(self.ssh_client)
+                uptime = self.get_uptime(self.ssh_client)
 
                 self.time_points.append(time.strftime("%H:%M:%S"))
                 self.cpu_usage_data.append(cpu_usage)
                 self.memory_usage_data.append(memory_usage)
-                self.network_data_sent.append(network_sent)
-                self.network_data_received.append(network_received)
+                # Check for sudden increases or decreases in CPU and memory usage
+                self.check_and_notify(cpu_usage, memory_usage)
                 self.disk_usage_data.append(disk_usage)
                 self.process_count_data.append(process_count)
+                self.uptime_data.append(uptime)
 
                 self.update_graph()
-                print(f"CPU Usage: {cpu_usage}%\nMemory Usage: {memory_usage} MB\n"
-                      f"Network Sent: {network_sent} bytes\nNetwork Received: {network_received} bytes\n"
-                      f"Disk Usage: {disk_usage}%\nNumber of Processes: {process_count}")
 
                 time.sleep(5)
 
         except AuthenticationException:
-            print("Authentication failed. Please check your credentials.")
+            self.handle_error("Authentication failed. Please check your credentials.")
         except SSHException as e:
-            print(f"Error connecting to the server: {str(e)}")
+            self.handle_error(f"Error connecting to the server: {str(e)}")
         except Exception as e:
-            print(f"An unexpected error occurred: {str(e)}")
+            self.handle_error(f"An unexpected error occurred: {str(e)}")
 
         finally:
             if self.ssh_client:
                 self.ssh_client.close()
                 self.ssh_client = None
 
+            # Update GUI after monitoring stops
+            self.root.title("Server Monitor")
             self.monitor_button["state"] = tk.NORMAL
             self.stop_button["state"] = tk.DISABLED
             self.show_process_button["state"] = tk.NORMAL
 
             self.monitoring_running = False
-            print("Monitoring stopped.")
+            messagebox.showinfo("Monitoring Stopped", "Monitoring stopped.")
 
-    def get_network_data(self, ssh):
-        stdin, stdout, stderr = ssh.exec_command("cat /proc/net/dev")
-        network_data = stdout.read().decode().strip().split()
 
+    def handle_error(self, error_message):
+    # Display an error message in the GUI
+        messagebox.showinfo("Error", error_message)
+
+    # Send a notification to Google Chat about the error
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"{current_time} - Host: {self.hostname} - Error: {error_message}"
+        self.send_notification(message)
+
+    def check_and_notify(self, cpu_usage, memory_usage):
+        # Định nghĩa một ngưỡng cho sự thay đổi đột ngột (bạn có thể điều chỉnh ngưỡng này)
+        threshold_percentage = 70
+
+        # Lấy thông tin về thời gian hiện tại
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Check for sudden increase or decrease in CPU usage
+        cpu_change = abs(cpu_usage - self.prev_cpu_usage)
+        if cpu_change > threshold_percentage:
+            message = f"{current_time} - Host: {self.hostname} - Sudden change in CPU usage: {cpu_change:.2f}%"
+            self.send_notification(message)
+
+        # Check for sudden increase or decrease in memory usage
+        memory_change = abs(memory_usage - self.prev_memory_usage)
+        if memory_change > threshold_percentage:
+            message = f"{current_time} - Host: {self.hostname} - Sudden change in memory usage: {memory_change:.2f} MB"
+            self.send_notification(message)
+
+        # Update previous values
+        self.prev_cpu_usage = cpu_usage
+        self.prev_memory_usage = memory_usage
+
+    def send_notification(self, message):
+        # Send a notification to Google Chat using the webhook
+        payload = {
+            "text": message,
+        }
+        headers = {"Content-Type": "application/json"}
+
+        response = None
         try:
-            if len(network_data) >= 1:
-                network_sent = int(network_data[9])
-                network_received = int(network_data[1])
-                return network_sent, network_received
-        except ValueError:
-            pass
+            response = requests.post(self.chat_webhook_url, json=payload, headers=headers)
+            response.raise_for_status()
+            print("Notification sent successfully.")
+        except requests.RequestException as e:
+            print(f"Error sending notification: {e}")
+            print(f"API Response: {response.text}")
 
-        return 0, 0
+    def get_uptime(self, ssh):
+        stdin, stdout, stderr = ssh.exec_command("uptime | awk '{print $3}'")
+        return stdout.read().decode().strip()
 
     def get_cpu_usage(self, ssh):
         stdin, stdout, stderr = ssh.exec_command("top -bn1 | awk 'NR>7{s+=$9} END {print s}'")
@@ -218,31 +279,45 @@ class ServerMonitorApp:
         stdin, stdout, stderr = ssh.exec_command("ps aux | wc -l")
         return int(stdout.read().decode().strip())
 
-    def plot_network_chart(self):
-        self.ax_network.clear()
-        network_sent = max(0, self.network_data_sent[-1])
-        network_received = max(0, self.network_data_received[-1])
-        self.ax_network.bar(['Sent'], [network_sent], color='orange', label='Sent')
-        self.ax_network.bar(['Received'], [network_received], color='lightblue', label='Received', bottom=network_sent)
-        self.ax_network.set_ylabel('Network Usage (Bytes)')
-        self.ax_network.set_title('Network Usage')
-        self.ax_network.legend()
+    def update_graph(self):
+        self.root.after(0, self.plot_cpu_chart)
+        self.root.after(0, self.plot_memory_chart)
+        self.root.after(0, self.plot_disk_chart)
+        self.root.after(0, self.plot_process_chart)
+        self.root.after(0, self.plot_uptime_chart)
+
+    def plot_cpu_chart(self):
+        self.ax_cpu.clear()
+        cpu_values = [max(0, float(100 - self.cpu_usage_data[-1])), max(0, float(self.cpu_usage_data[-1]))]
+        try:
+            self.ax_cpu.pie(cpu_values, labels=['', f'Usage: {self.cpu_usage_data[-1]:.1f}%'], autopct='%1.1f%%',
+                            startangle=90, colors=['lightgray', 'lightblue'])
+        except ValueError:
+            pass
+        self.ax_cpu.set_title('CPU Usage')
+        self.canvas.draw()
+
+    def plot_memory_chart(self):
+        self.ax_memory.clear()
+        memory_value = max(0, float(self.memory_usage_data[-1]))
+        self.ax_memory.bar(['Memory Usage'], [memory_value], color='lightgreen')
+        self.ax_memory.set_ylabel('Memory Usage (MB)')
+        self.ax_memory.set_title('Memory Usage')
         self.canvas.draw()
 
     def plot_disk_chart(self):
         self.ax_disk.clear()
-
         used_gb, free_gb = self.disk_usage_data[-1]
 
         used_gb_value = float(used_gb[:-1]) if used_gb[-1] == 'G' else float(used_gb)
         free_gb_value = float(free_gb[:-1]) if free_gb[-1] == 'G' else float(free_gb)
 
-        self.ax_disk.bar(['Used'], [used_gb_value], color='lightcoral', label='Used')
-        self.ax_disk.bar(['Free'], [free_gb_value], color='lightblue', label='Free', bottom=used_gb_value)
+        disk_data = [used_gb_value, free_gb_value]
+        labels = ['Used', 'Free']
+        colors = ['lightcoral', 'lightblue']
 
-        self.ax_disk.set_ylabel('Disk Usage (GB)')
+        self.ax_disk.pie(disk_data, labels=labels, autopct='%1.1f%%', startangle=90, colors=colors)
         self.ax_disk.set_title('Disk Usage')
-        self.ax_disk.legend()
         self.canvas.draw()
 
     def plot_process_chart(self):
@@ -253,29 +328,13 @@ class ServerMonitorApp:
         self.ax_process.set_title('Process Count')
         self.canvas.draw()
 
-    def update_graph(self):
-        self.root.after(0, self.plot_pie_chart)
-        self.root.after(0, self.plot_network_chart)
-        self.root.after(0, self.plot_disk_chart)
-        self.root.after(0, self.plot_process_chart)
-
-
-    def plot_pie_chart(self):
-        cpu_values = [max(0, float(100 - self.cpu_usage_data[-1])), max(0, float(self.cpu_usage_data[-1]))]
-        self.ax_cpu.clear()
-        try:
-            self.ax_cpu.pie(cpu_values, labels=['', f'Usage: {self.cpu_usage_data[-1]:.1f}%'], autopct='%1.1f%%',
-                            startangle=90, colors=['lightgray', 'lightblue'])
-        except ValueError:
-            pass
-        self.ax_cpu.set_title('CPU Usage')
-
-        self.ax_memory.clear()
-        memory_value = max(0, float(self.memory_usage_data[-1]))
-        self.ax_memory.bar(['Memory Usage'], [memory_value], color='lightgreen')
-        self.ax_memory.set_ylabel('Memory Usage (MB)')
-        self.ax_memory.set_title('Memory Usage')
-
+    def plot_uptime_chart(self):
+        self.ax_uptime.clear()
+        uptime_values = [float(uptime.split(':')[0]) for uptime in self.uptime_data]
+        self.ax_uptime.plot(self.time_points, uptime_values, marker='o', linestyle='-', color='purple')
+        self.ax_uptime.set_ylabel('Uptime (hours)')
+        self.ax_uptime.set_title('Server Uptime')
+        self.ax_uptime.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False)  # Tắt trục x
         self.canvas.draw()
 
 
